@@ -1,0 +1,229 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Zero-dependency PSR-4 autoloader for EidCloud\LinuxTroubleshooter
+spl_autoload_register(function (string $class) {
+    $prefix = 'EidCloud\\LinuxTroubleshooter\\';
+    $baseDir = __DIR__ . '/../src/';
+
+    $len = strlen($prefix);
+    if (strncmp($prefix, $class, $len) !== 0) {
+        return;
+    }
+
+    $relativeClass = substr($class, $len);
+    $file = $baseDir . str_replace('\\', '/', $relativeClass) . '.php';
+
+    if (file_exists($file)) {
+        require $file;
+    }
+});
+
+use EidCloud\LinuxTroubleshooter\Troubleshooter;
+use EidCloud\LinuxTroubleshooter\Models\DiagnosticReport;
+
+// ANSI colors
+$cReset = "\033[0m";
+$cBold = "\033[1m";
+$cGreen = "\033[32m";
+$cRed = "\033[31m";
+$cYellow = "\033[33m";
+$cCyan = "\033[36m";
+$cBlue = "\033[34m";
+
+// Parse CLI arguments
+$args = array_slice($argv, 1);
+
+function showHelp(): void
+{
+    global $cBold, $cCyan, $cGreen, $cReset, $cYellow;
+    echo <<<HELP
+{$cBold}{$cCyan}eidcloud-linux-troubleshooter (v1.0.0){$cReset}
+Autonomous Linux Server Troubleshooter & Incident Diagnostics Agent.
+
+{$cBold}USAGE:{$cReset}
+  php bin/eidcloud-troubleshoot <command> [options]
+
+{$cBold}COMMANDS:{$cReset}
+  {$cGreen}diagnose [query]{$cReset}        Run autonomous diagnosis on specific problem or entire system.
+                           Example: php bin/eidcloud-troubleshoot diagnose "why is nginx returning 502?"
+  {$cGreen}check --service=<name>{$cReset}  Quick targeted health check of a systemd service.
+                           Example: php bin/eidcloud-troubleshoot check --service=php-fpm
+  {$cGreen}audit-system{$cReset}            Full systemic health audit of memory, disks, ports, firewall & daemons.
+                           Example: php bin/eidcloud-troubleshoot audit-system --json
+
+{$cBold}OPTIONS:{$cReset}
+  {$cYellow}--json{$cReset}                   Output reports and audit results in structured JSON format.
+  {$cYellow}--auto-remediate{$cReset}         Automatically execute remediation steps without prompt.
+  {$cYellow}--service=<name>{$cReset}          Specify service name for targeted health checks.
+  {$cYellow}-h, --help{$cReset}                Display this help documentation.
+
+{$cBold}SAFE EXECUTION LIFECYCLE:{$cReset}
+  1. READ       -> Gathers logs, processes, systemd units, network bindings, and metrics.
+  2. DIAGNOSE   -> Pinpoints root cause with confidence score and evidence lines.
+  3. PROPOSE    -> Synthesizes idempotent, minimal shell commands.
+  4. CONFIRM    -> Prompts user [y/N] or honors --auto-remediate.
+  5. EXECUTE    -> Applies remediations and immediately re-checks health.
+
+HELP;
+    exit(0);
+}
+
+if (empty($args) || in_array('-h', $args, true) || in_array('--help', $args, true)) {
+    showHelp();
+}
+
+$command = $args[0];
+$isJson = in_array('--json', $args, true);
+$autoRemediate = in_array('--auto-remediate', $args, true);
+
+$serviceParam = null;
+foreach ($args as $arg) {
+    if (str_starts_with($arg, '--service=')) {
+        $serviceParam = substr($arg, 10);
+    }
+}
+
+$troubleshooter = new Troubleshooter();
+
+switch ($command) {
+    case 'diagnose':
+        $query = isset($args[1]) && !str_starts_with($args[1], '--') ? $args[1] : 'all';
+        $reports = $troubleshooter->diagnose($query);
+
+        if ($isJson) {
+            echo json_encode([
+                'query' => $query,
+                'count' => count($reports),
+                'diagnostics' => array_map(fn(DiagnosticReport $r) => $r->toArray(), $reports),
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            exit(0);
+        }
+
+        echo "{$cBold}{$cCyan}🔍 Autonomous Diagnosis Query: '{$query}'{$cReset}\n";
+        echo str_repeat("─", 65) . "\n";
+
+        if (empty($reports)) {
+            echo "{$cGreen}✓ No server incidents detected. All diagnostic rules passed clean.{$cReset}\n\n";
+            exit(0);
+        }
+
+        foreach ($reports as $idx => $report) {
+            $num = $idx + 1;
+            echo "{$cBold}{$cRed}[#{$num}] {$report->issueType} (Confidence: " . round($report->confidence * 100, 1) . "%){$cReset}\n";
+            echo "  {$cBold}Target Service:{$cReset} {$report->service}\n";
+            echo "  {$cBold}Summary:{$cReset}        {$report->summary}\n";
+            echo "  {$cBold}Evidence:{$cReset}\n";
+            foreach ($report->evidence as $ev) {
+                echo "    • [{$ev->source}] {$ev->significance}\n";
+                $lines = explode("\n", $ev->logSnippet);
+                foreach ($lines as $l) {
+                    echo "      {$cYellow}> " . trim($l) . "{$cReset}\n";
+                }
+            }
+
+            if ($report->remediationPlan !== null) {
+                echo "  {$cBold}{$cBlue}Proposed Remediation Plan:{$cReset} {$report->remediationPlan->title}\n";
+                foreach ($report->remediationPlan->steps as $sIdx => $step) {
+                    $sNum = $sIdx + 1;
+                    echo "    {$sNum}. {$step->description}\n";
+                    echo "       {$cCyan}$ {$step->command}{$cReset}\n";
+                }
+
+                $shouldExecute = $autoRemediate;
+                if (!$shouldExecute) {
+                    echo "\n  Apply this remediation plan now? [y/N]: ";
+                    $handle = fopen("php://stdin", "r");
+                    $line = $handle ? trim(fgets($handle) ?: '') : '';
+                    if (strtolower($line) === 'y') {
+                        $shouldExecute = true;
+                    }
+                }
+
+                if ($shouldExecute) {
+                    echo "  {$cYellow}⚡ Executing plan steps...{$cReset}\n";
+                    $remResult = $troubleshooter->remediate($report);
+                    if ($remResult['success']) {
+                        echo "  {$cGreen}✓ Remediation successful! Service restored and verified.{$cReset}\n";
+                    } else {
+                        echo "  {$cRed}✗ Remediation or verification failed. Status: {$remResult['post_status']}{$cReset}\n";
+                        if (!empty($remResult['execution_result']['error'])) {
+                            echo "    Error: {$remResult['execution_result']['error']}\n";
+                        }
+                    }
+                } else {
+                    echo "  {$cYellow}Skipped execution.{$cReset}\n";
+                }
+            }
+            echo str_repeat("─", 65) . "\n";
+        }
+        break;
+
+    case 'check':
+        if (!$serviceParam) {
+            echo "{$cRed}Error: Please specify service via --service=<name>{$cReset}\n";
+            exit(1);
+        }
+
+        $res = $troubleshooter->checkService($serviceParam);
+
+        if ($isJson) {
+            echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            exit(0);
+        }
+
+        $statusColor = $res['is_active'] ? $cGreen : $cRed;
+        echo "{$cBold}Service Health Check: {$serviceParam}{$cReset}\n";
+        echo "Status: {$statusColor}{$res['status']}{$cReset}\n";
+        echo "\n{$cBold}Recent Journal Logs:{$cReset}\n";
+        echo ($res['recent_logs'] ?: 'No recent logs found.') . PHP_EOL;
+        break;
+
+    case 'audit-system':
+        $audit = $troubleshooter->auditSystem();
+
+        if ($isJson) {
+            echo json_encode($audit, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            exit(0);
+        }
+
+        echo "{$cBold}{$cCyan}🖥️  EidCloud Systemic Health Audit{$cReset}\n";
+        echo "Timestamp: {$audit['timestamp']}\n";
+        echo str_repeat("─", 65) . "\n";
+
+        echo "{$cBold}Memory Utilization:{$cReset}\n";
+        $mem = $audit['memory'];
+        echo "  Total: {$mem['total_mb']} MB | Used: {$mem['used_mb']} MB | Avail: {$mem['available_mb']} MB ({$mem['percent_used']}% used)\n\n";
+
+        echo "{$cBold}Storage Mounts:{$cReset}\n";
+        foreach ($audit['disks'] as $d) {
+            $color = $d['percent'] >= 90 ? $cRed : ($d['percent'] >= 75 ? $cYellow : $cGreen);
+            echo "  • {$d['mount']} ({$d['filesystem']}): {$color}{$d['percent']}% used{$cReset} [{$d['used']} / {$d['size']}]\n";
+        }
+        echo "\n";
+
+        echo "{$cBold}Firewall (UFW):{$cReset} " . ($audit['firewall']['active'] ? "{$cGreen}ACTIVE{$cReset}" : "{$cYellow}INACTIVE{$cReset}") . "\n\n";
+
+        echo "{$cBold}Core Daemons:{$cReset}\n";
+        foreach ($audit['services'] as $srv => $up) {
+            $status = $up ? "{$cGreen}RUNNING{$cReset}" : "{$cRed}STOPPED / NOT FOUND{$cReset}";
+            echo "  • " . str_pad($srv, 18) . ": {$status}\n";
+        }
+        echo "\n";
+
+        echo "{$cBold}Active Incident Diagnostics:{$cReset} {$audit['incidents_detected']} found\n";
+        if ($audit['incidents_detected'] > 0) {
+            foreach ($audit['diagnostics'] as $d) {
+                echo "  {$cRed}! {$d['issue_type']} ({$d['service']}): {$d['summary']}{$cReset}\n";
+            }
+        } else {
+            echo "  {$cGreen}✓ All subsystem diagnostic rules passed.{$cReset}\n";
+        }
+        break;
+
+    default:
+        echo "{$cRed}Unknown command: '{$command}'{$cReset}\n";
+        showHelp();
+}

@@ -1,0 +1,12 @@
+{
+  "description": "Autonomous Linux server incident troubleshooter diagnosing Nginx 502, PHP-FPM, OOM, and disk exhaustion in pure PHP",
+  "topics": [
+    "eidcloud",
+    "linux-troubleshooter",
+    "sysadmin-agent",
+    "server-diagnostics",
+    "nginx-502",
+    "php-fpm-monitor",
+    "php8"
+  ]
+}

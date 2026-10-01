@@ -1,0 +1,24 @@
+{
+    "name": "eidcloud/linux-troubleshooter",
+    "description": "Autonomous Linux server incident troubleshooter diagnosing Nginx 502, PHP-FPM, OOM, and disk exhaustion in pure PHP",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Eng. MHD. Shadi AL-Hasan",
+            "role": "Lead Architect & Maintainer"
+        }
+    ],
+    "require": {
+        "php": ">=8.2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "EidCloud\\LinuxTroubleshooter\\": "src/"
+        }
+    },
+    "bin": [
+        "bin/eidcloud-troubleshoot"
+    ],
+    "minimum-stability": "stable"
+}
